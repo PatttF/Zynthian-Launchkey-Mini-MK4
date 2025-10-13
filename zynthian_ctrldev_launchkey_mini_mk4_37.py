@@ -26,11 +26,11 @@
 #
 #******************************************************************************
 # This driver implements support for the Novation Launchkey Mini MK4 37-key
-# controller in DAW mode, with support for:
+# controller in DAW mode with Transport mode encoders (relative):
 # - Keyboard input (all notes pass through to synths)
 # - Pad buttons (top row for solo, bottom row for mute)
-# - Mixer control (knobs 1-6 for levels, with soft takeover) in bank 0
-# - ZynPot control (knobs 1-4 in bank 1)
+# - Three knob banks: Bank 0 (mixer 1-6), Bank 1 (ZYNPOT 0-3 + CC 20-23), Bank 2 (CC 24-31)
+# - Transport mode encoders for endless rotation
 #******************************************************************************
 from time import sleep, time
 from threading import Timer
@@ -39,6 +39,7 @@ from threading import Timer
 from zyngine.ctrldev.zynthian_ctrldev_base import zynthian_ctrldev_zynpad, zynthian_ctrldev_zynmixer
 from zyncoder.zyncore import lib_zyncore
 from zynlibs.zynseq import zynseq
+from zyngine.zynthian_signal_manager import zynsigman
 
 # ------------------------------------------------------------------------------------------------------------------
 # Novation Launchkey Mini MK4 37
@@ -47,8 +48,8 @@ from zynlibs.zynseq import zynseq
 class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_ctrldev_zynmixer):
 
     dev_ids = ["Launchkey Mini MK4 37 IN 2"]  # In DAW mode, everything comes through IN 2 (like MK3)
-    driver_name = "Launchkey MiniMK4 37"
-    driver_description = "Interface Novation Launchkey Mini Mk4 with zynpad"
+    driver_name = "Launchkey Mini MK4 37"
+    driver_description = "Interface Novation Launchkey Mini Mk4 with Zynthian"
     unroute_from_chains = True  # Prevent automatic routing, we'll handle keyboard notes explicitly
 
     PAD_COLOURS = [71, 104, 76, 51, 104, 41, 64, 12, 11, 71, 4, 67, 42, 9, 105, 15]
@@ -60,43 +61,35 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
         self.shift = False
         self.press_times = {}
         self.knob_bank = 0  # Track current knob bank (0 = mixer, 1 = zynpot+CC, 2 = CC)
-        self.mixer_synced = {}  # Track which mixer knobs have synced with current mixer levels
-        self.last_zynpot_values = {}  # Track last values for ZYNPOT delta calculation
         super().__init__(state_manager, idev_in, idev_out)
-        self.sys_ex_header = (0xF0, 0x00, 0x20, 0x29, 0x02, 0x14)
-
-    def send_sysex(self, data):
-        if self.idev_out is not None:
-            msg = self.sys_ex_header + bytes.fromhex(data) + (0xF7,)
-            lib_zyncore.dev_send_midi_event(self.idev_out, msg, len(msg))
-            sleep(0.05)
 
     def init(self):
         # Enable DAW mode on launchkey
         lib_zyncore.dev_send_note_on(self.idev_out, 15, 12, 127)
+        sleep(0.2)
+        # Set encoders to Transport mode (relative mode)
+        # Channel 7 (B6h = 182 decimal), CC 30 (1Eh = 30 decimal), Value 5 (Transport mode)
+        lib_zyncore.dev_send_ccontrol_change(self.idev_out, 6, 30, 5)
+        sleep(0.1)
+        # Send it again to make sure it sticks
+        lib_zyncore.dev_send_ccontrol_change(self.idev_out, 6, 30, 5)
         self.cols = 8
         self.rows = 2
         super().init()
         # Light up navigation buttons
         self.update_button_leds()
-        # Schedule pad LED update after 10 seconds to ensure chains are loaded
-        Timer(10.0, self.update_pad_leds).start()
+        # Update pad LEDs immediately
+        self.update_pad_leds()
         
-        # Register callbacks for real-time updates
-        try:
-            # Update pad LEDs when chains change
-            self.state_manager.chain_manager_changed_signal.connect(self.update_pad_leds)
-            # Update when mixer state changes
-            if hasattr(self.state_manager, 'zynmixer'):
-                self.state_manager.zynmixer.level_changed_signal.connect(self.update_pad_leds)
-        except:
-            pass  # Signals may not be available
+        # Register callbacks for real-time updates using zynsigman
+        zynsigman.register_queued(zynsigman.S_CHAIN_MAN, self.chain_manager.SS_SET_ACTIVE_CHAIN, self.update_pad_leds)
+        zynsigman.register_queued(zynsigman.S_CHAIN_MAN, self.chain_manager.SS_MOVE_CHAIN, self.update_pad_leds)
+        zynsigman.register_queued(zynsigman.S_AUDIO_MIXER, self.zynmixer.SS_ZCTRL_SET_VALUE, self.update_mixer_strip)
+        zynsigman.register_queued(zynsigman.S_GUI, zynsigman.SS_GUI_SHOW_SCREEN, self.on_screen_change)
 
     def refresh(self):
-        """Called when screen changes - reset knob tracking for pickup mode"""
-        # Clear mixer sync so knobs re-sync with new values
-        self.mixer_synced.clear()
-        # Update pad LEDs
+        """Called when screen changes or chains are modified"""
+        # Update pad LEDs to reflect current mixer state
         self.update_pad_leds()
 
     def update_button_leds(self):
@@ -114,16 +107,25 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
         lib_zyncore.dev_send_ccontrol_change(self.idev_out, 0, 52, 127 if self.knob_bank == 1 else 0)
 
     def end(self):
-        # Disconnect signals
-        try:
-            self.state_manager.chain_manager_changed_signal.disconnect(self.update_pad_leds)
-            if hasattr(self.state_manager, 'zynmixer'):
-                self.state_manager.zynmixer.level_changed_signal.disconnect(self.update_pad_leds)
-        except:
-            pass
+        # Unregister signal callbacks
+        zynsigman.unregister(zynsigman.S_CHAIN_MAN, self.chain_manager.SS_SET_ACTIVE_CHAIN, self.update_pad_leds)
+        zynsigman.unregister(zynsigman.S_CHAIN_MAN, self.chain_manager.SS_MOVE_CHAIN, self.update_pad_leds)
+        zynsigman.unregister(zynsigman.S_AUDIO_MIXER, self.zynmixer.SS_ZCTRL_SET_VALUE, self.update_mixer_strip)
+        zynsigman.unregister(zynsigman.S_GUI, zynsigman.SS_GUI_SHOW_SCREEN, self.on_screen_change)
         super().end()
         # Disable DAW mode on launchkey
         lib_zyncore.dev_send_note_on(self.idev_out, 15, 12, 0)
+    
+    def update_mixer_strip(self, chan, symbol, value):
+        """Update pad LEDs when mixer values change (mute/solo)"""
+        # Only update if it's a mute or solo change
+        if symbol in ['mute', 'solo']:
+            self.update_pad_leds()
+    
+    def on_screen_change(self, screen):
+        """Update pad LEDs when screen changes (catches chain add/remove)"""
+        # Update LEDs when any screen is shown, as chains may have changed
+        self.update_pad_leds()
     
     def update_pad_leds(self):
         """Update pad LEDs based on mixer mute/solo state"""
@@ -269,7 +271,6 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
                 else:
                     # Button 51: Previous bank
                     self.knob_bank = (self.knob_bank - 1) % 3  # Cycle through 3 banks
-                    self.mixer_synced.clear()  # Reset mixer sync
                     # Update bank indicator LEDs
                     self.update_button_leds()
                 return True
@@ -280,7 +281,6 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
                 else:
                     # Button 52: Next bank
                     self.knob_bank = (self.knob_bank + 1) % 3  # Cycle through 3 banks
-                    self.mixer_synced.clear()  # Reset mixer sync
                     # Update bank indicator LEDs
                     self.update_button_leds()
                 return True
@@ -315,64 +315,68 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
 
                 
             # Knobs 1-8 - behavior depends on current bank
-            elif 20 < ccnum < 29:
+            # In Transport mode, knobs send CC 85-92 (relative values)
+            elif 84 < ccnum < 93:
                 if self.knob_bank == 0:
                     # Bank 0: Knobs 1-6 for mixer, knobs 7-8 unused
-                    if 20 < ccnum < 27:
-                        # Knobs 1-6 for mixer channels 1-6
-                        # Implement soft takeover - only change value once knob crosses current level
-                        mixer_channel = ccnum - 20
+                    if 84 < ccnum < 91:
+                        # Knobs 1-6 for mixer channels 1-6 (CC 85-90)
+                        # In Transport mode, encoders send relative values
+                        mixer_channel = ccnum - 84
                         chain = self.chain_manager.get_chain_by_position(mixer_channel - 1, midi=False)
                         if chain and chain.mixer_chan is not None and chain.mixer_chan < 17:
                             mixer_chan = chain.mixer_chan
-                            current_level = self.zynmixer.get_level(mixer_chan)
-                            new_level = ccval / 127.0
                             
-                            # Check if this knob has synced yet
-                            if ccnum not in self.mixer_synced:
-                                # Not synced - check if knob position is close enough to current level
-                                if abs(new_level - current_level) < 0.02:  # Within 2% (about 2-3 CC values)
-                                    self.mixer_synced[ccnum] = True
-                                    self.zynmixer.set_level(mixer_chan, new_level)
+                            # Convert relative encoder value to delta
+                            # Novation Transport mode: 1-63 = CCW, 65-127 = CW (or possibly just 1 and 127)
+                            if ccval == 1 or ccval < 64:
+                                delta = -1 if ccval == 1 else -(64 - ccval)
+                            elif ccval == 127 or ccval > 64:
+                                delta = 1 if ccval == 127 else (ccval - 64)
                             else:
-                                # Already synced - always update
+                                delta = 0
+                            
+                            if delta != 0:
+                                # Use direct mixer API to nudge level
+                                current_level = self.zynmixer.get_level(mixer_chan)
+                                new_level = max(0.0, min(1.0, current_level + (delta * 0.01)))
                                 self.zynmixer.set_level(mixer_chan, new_level)
-                    # Knobs 7-8 (CC 27-28) do nothing in bank 0
+                    # Knobs 7-8 (CC 91-92) do nothing in bank 0
                     return True
                 elif self.knob_bank == 1:
                     # Bank 1: Knobs 1-4 for ZYNPOT, 5-8 send CC 20-23
-                    if 20 < ccnum < 25:
-                        # Knobs 1-4 for ZYNPOT (CC 21-24)
+                    if 84 < ccnum < 89:
+                        # Knobs 1-4 for ZYNPOT (CC 85-88)
                         # Maps to ZYNPOT 0-3 (the 4 main rotary encoders on Zynthian)
-                        # ZYNPOT expects relative delta values, so calculate change from last value
-                        zynpot_index = ccnum - 21
+                        # In Transport mode, encoders send relative values
+                        zynpot_index = ccnum - 85
                         
-                        # Initialize tracking if first time
-                        if ccnum not in self.last_zynpot_values:
-                            self.last_zynpot_values[ccnum] = ccval
-                            return True
+                        # Convert relative encoder value to delta
+                        # Novation Transport mode: 1-63 = CCW, 65-127 = CW (or possibly just 1 and 127)
+                        if ccval == 1 or ccval < 64:
+                            delta = -1 if ccval == 1 else -(64 - ccval)
+                        elif ccval == 127 or ccval > 64:
+                            delta = 1 if ccval == 127 else (ccval - 64)
+                        else:
+                            delta = 0
                         
-                        # Calculate delta
-                        last_val = self.last_zynpot_values[ccnum]
-                        delta = ccval - last_val
-                        
-                        # Handle wrap-around (127->0 or 0->127)
-                        if delta > 64:
-                            delta -= 128
-                        elif delta < -64:
-                            delta += 128
-                        
-                        # Send delta if there's movement
                         if delta != 0:
+                            # Use regular ZYNPOT command with relative delta
                             self.state_manager.send_cuia("ZYNPOT", [zynpot_index, delta])
-                            self.last_zynpot_values[ccnum] = ccval
                         
                         return True
                     else:
                         # Knobs 5-8: Send CC 20-23 (standard MIDI CC)
-                        new_ccnum = ccnum - 25 + 20  # Map 25-28 to 20-23
+                        # CC 89-92 map to CC 20-23
+                        new_ccnum = ccnum - 89 + 20  # Map 89-92 to 20-23
                         lib_zyncore.write_zynmidi([0xB0 | ev_chan, new_ccnum, ccval])
                         return True
+                elif self.knob_bank == 2:
+                    # Bank 2: Send CC 24-31 (standard MIDI CC)
+                    # CC 85-92 map to CC 24-31
+                    new_ccnum = ccnum - 85 + 24  # Map 85-92 to 24-31
+                    lib_zyncore.write_zynmidi([0xB0 | ev_chan, new_ccnum, ccval])
+                    return True
             
             # Combined ZynSwitch and Metronome logic
             elif ccnum in [74, 75, 76, 77]:
