@@ -25,7 +25,7 @@
 # For a full copy of the GNU General Public License see the LICENSE.txt file.
 #
 #******************************************************************************
-# This driver implements support for the Novation Launchkey MK4 37-key
+# This driver implements support for the Novation Launchkey Mini MK4 37-key
 # controller in DAW mode, with support for:
 # - Keyboard input (all notes pass through to synths)
 # - Pad buttons (top row for solo, bottom row for mute)
