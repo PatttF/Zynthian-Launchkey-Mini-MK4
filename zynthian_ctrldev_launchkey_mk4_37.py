@@ -41,7 +41,7 @@ from zyncoder.zyncore import lib_zyncore
 from zynlibs.zynseq import zynseq
 
 # ------------------------------------------------------------------------------------------------------------------
-# Novation Launchkey MK4 37
+# Novation Launchkey Mini MK4 37
 # ------------------------------------------------------------------------------------------------------------------
 
 class zynthian_ctrldev_launchkey_mk4_37(zynthian_ctrldev_zynpad, zynthian_ctrldev_zynmixer):
