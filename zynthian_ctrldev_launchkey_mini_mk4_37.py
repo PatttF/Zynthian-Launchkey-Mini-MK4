@@ -44,7 +44,7 @@ from zynlibs.zynseq import zynseq
 # Novation Launchkey Mini MK4 37
 # ------------------------------------------------------------------------------------------------------------------
 
-class zynthian_ctrldev_launchkey_mk4_37(zynthian_ctrldev_zynpad, zynthian_ctrldev_zynmixer):
+class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_ctrldev_zynmixer):
 
     dev_ids = ["Launchkey Mini MK4 37 IN 2"]  # In DAW mode, everything comes through IN 2 (like MK3)
     driver_name = "Launchkey MiniMK4 37"
