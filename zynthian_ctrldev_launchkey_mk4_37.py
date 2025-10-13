@@ -3,7 +3,7 @@
 #******************************************************************************
 # ZYNTHIAN PROJECT: Zynthian Control Device Driver
 #
-# Zynthian Control Device Driver for "Novation Launchkey MK4"
+# Zynthian Control Device Driver for "Novation Launchkey Mini MK4 37"
 #
 # Copyright (C) 2015-2023 Fernando Moyano <jofemodo@zynthian.org>
 #                         Brian Walton <brian@riban.co.uk>
@@ -30,7 +30,7 @@
 # - Keyboard input (all notes pass through to synths)
 # - Pad buttons (top row for solo, bottom row for mute)
 # - Mixer control (knobs 1-6 for levels, with soft takeover) in bank 0
-# - ZynPot control (knobs 1-4 in bank 1
+# - ZynPot control (knobs 1-4 in bank 1)
 #******************************************************************************
 from time import sleep, time
 from threading import Timer
@@ -81,6 +81,16 @@ class zynthian_ctrldev_launchkey_mk4_37(zynthian_ctrldev_zynpad, zynthian_ctrlde
         self.update_button_leds()
         # Schedule pad LED update after 10 seconds to ensure chains are loaded
         Timer(10.0, self.update_pad_leds).start()
+        
+        # Register callbacks for real-time updates
+        try:
+            # Update pad LEDs when chains change
+            self.state_manager.chain_manager_changed_signal.connect(self.update_pad_leds)
+            # Update when mixer state changes
+            if hasattr(self.state_manager, 'zynmixer'):
+                self.state_manager.zynmixer.level_changed_signal.connect(self.update_pad_leds)
+        except:
+            pass  # Signals may not be available
 
     def refresh(self):
         """Called when screen changes - reset knob tracking for pickup mode"""
@@ -104,6 +114,13 @@ class zynthian_ctrldev_launchkey_mk4_37(zynthian_ctrldev_zynpad, zynthian_ctrlde
         lib_zyncore.dev_send_ccontrol_change(self.idev_out, 0, 52, 127 if self.knob_bank == 1 else 0)
 
     def end(self):
+        # Disconnect signals
+        try:
+            self.state_manager.chain_manager_changed_signal.disconnect(self.update_pad_leds)
+            if hasattr(self.state_manager, 'zynmixer'):
+                self.state_manager.zynmixer.level_changed_signal.disconnect(self.update_pad_leds)
+        except:
+            pass
         super().end()
         # Disable DAW mode on launchkey
         lib_zyncore.dev_send_note_on(self.idev_out, 15, 12, 0)
