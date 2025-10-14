@@ -60,7 +60,8 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
     def __init__(self, state_manager, idev_in, idev_out=None):
         self.shift = False
         self.press_times = {}
-        self.knob_bank = 0  # Track current knob bank (0 = mixer, 1 = zynpot+CC, 2 = CC)
+        self.knob_bank = 1  # Track current knob bank (0 = mixer, 1 = zynpot+CC, 2 = CC) - default to bank 1
+        self.last_select_back_time = 0  # Debounce timer for SELECT/BACK knob
         super().__init__(state_manager, idev_in, idev_out)
 
     def init(self):
@@ -71,8 +72,6 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
         # Channel 7 (B6h = 182 decimal), CC 30 (1Eh = 30 decimal), Value 5 (Transport mode)
         lib_zyncore.dev_send_ccontrol_change(self.idev_out, 6, 30, 5)
         sleep(0.1)
-        # Send it again to make sure it sticks
-        lib_zyncore.dev_send_ccontrol_change(self.idev_out, 6, 30, 5)
         self.cols = 8
         self.rows = 2
         super().init()
@@ -256,11 +255,11 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
             
             # Button mappings for CC-based buttons
             button_commands = {
-                106: "PRESET",
-                107: "MENU",
+                107: "PRESET",
+                105: "MENU",
                 0x66: "ARROW_RIGHT",
                 0x67: "ARROW_LEFT",
-                104: "BACK"
+                106: "BACK"
             }
             
             # Handle buttons 51 and 52 - bank switching normally, up/down with shift
@@ -291,7 +290,7 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
                 return True
 
             # Handle button 105 as ZYNSWITCH 3 with press/release detection
-            elif ccnum == 105:
+            elif ccnum == 104:
                 if ccval > 0:
                     # Button press: Record the current time
                     self.press_times[ccnum] = time()
@@ -318,33 +317,31 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
             # In Transport mode, knobs send CC 85-92 (relative values)
             elif 84 < ccnum < 93:
                 if self.knob_bank == 0:
-                    # Bank 0: Knobs 1-6 for mixer, knobs 7-8 unused
-                    if 84 < ccnum < 91:
-                        # Knobs 1-6 for mixer channels 1-6 (CC 85-90)
-                        # In Transport mode, encoders send relative values
-                        mixer_channel = ccnum - 84
-                        chain = self.chain_manager.get_chain_by_position(mixer_channel - 1, midi=False)
-                        if chain and chain.mixer_chan is not None and chain.mixer_chan < 17:
-                            mixer_chan = chain.mixer_chan
-                            
-                            # Convert relative encoder value to delta
-                            # Novation Transport mode: 1-63 = CCW, 65-127 = CW (or possibly just 1 and 127)
-                            if ccval == 1 or ccval < 64:
-                                delta = -1 if ccval == 1 else -(64 - ccval)
-                            elif ccval == 127 or ccval > 64:
-                                delta = 1 if ccval == 127 else (ccval - 64)
-                            else:
-                                delta = 0
-                            
-                            if delta != 0:
-                                # Use direct mixer API to nudge level
-                                current_level = self.zynmixer.get_level(mixer_chan)
-                                new_level = max(0.0, min(1.0, current_level + (delta * 0.01)))
-                                self.zynmixer.set_level(mixer_chan, new_level)
-                    # Knobs 7-8 (CC 91-92) do nothing in bank 0
+                    # Bank 0: Knobs 1-8 for mixer channels 1-8
+                    # Knobs 1-8 for mixer channels 1-8 (CC 85-92)
+                    # In Transport mode, encoders send relative values
+                    mixer_channel = ccnum - 84
+                    chain = self.chain_manager.get_chain_by_position(mixer_channel - 1, midi=False)
+                    if chain and chain.mixer_chan is not None and chain.mixer_chan < 17:
+                        mixer_chan = chain.mixer_chan
+                        
+                        # Convert relative encoder value to delta
+                        # Novation Transport mode: 1-63 = CCW, 65-127 = CW (or possibly just 1 and 127)
+                        if ccval == 1 or ccval < 64:
+                            delta = -1 if ccval == 1 else -(64 - ccval)
+                        elif ccval == 127 or ccval > 64:
+                            delta = 1 if ccval == 127 else (ccval - 64)
+                        else:
+                            delta = 0
+                        
+                        if delta != 0:
+                            # Use direct mixer API to nudge level
+                            current_level = self.zynmixer.get_level(mixer_chan)
+                            new_level = max(0.0, min(1.0, current_level + (delta * 0.01)))
+                            self.zynmixer.set_level(mixer_chan, new_level)
                     return True
                 elif self.knob_bank == 1:
-                    # Bank 1: Knobs 1-4 for ZYNPOT, 5-8 send CC 20-23
+                    # Bank 1: Knobs 1-4 for ZYNPOT, 5 unused, 6 for SELECT/BACK, 7-8 for arrows
                     if 84 < ccnum < 89:
                         # Knobs 1-4 for ZYNPOT (CC 85-88)
                         # Maps to ZYNPOT 0-3 (the 4 main rotary encoders on Zynthian)
@@ -365,12 +362,44 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
                             self.state_manager.send_cuia("ZYNPOT", [zynpot_index, delta])
                         
                         return True
-                    else:
-                        # Knobs 5-8: Send CC 20-23 (standard MIDI CC)
-                        # CC 89-92 map to CC 20-23
-                        new_ccnum = ccnum - 89 + 20  # Map 89-92 to 20-23
-                        lib_zyncore.write_zynmidi([0xB0 | ev_chan, new_ccnum, ccval])
+                    # Knob 5 (CC 89) is unused in bank 1
+                    elif ccnum == 90:
+                        # Knob 6 (CC 90): SELECT on clockwise / BACK on counter-clockwise
+                        # Debounce to prevent accidental double selections
+                        current_time = time()
+                        if current_time - self.last_select_back_time < 0.6:  # 600ms debounce
+                            return True
+                        self.last_select_back_time = current_time
+                        
+                        # Convert relative encoder value to direction
+                        if ccval == 1 or ccval < 64:
+                            # CCW = BACK
+                            self.state_manager.send_cuia("BACK")
+                        elif ccval == 127 or ccval > 64:
+                            # CW = SELECT with short press simulation
+                            self.state_manager.send_cuia("ZYNSWITCH", [3, 'S'])
                         return True
+                    elif ccnum == 91:
+                        # Knob 7 (CC 91): Arrow left/right control
+                        # Convert relative encoder value to direction
+                        if ccval == 1 or ccval < 64:
+                            # CCW = Arrow Left
+                            self.state_manager.send_cuia("ARROW_LEFT")
+                        elif ccval == 127 or ccval > 64:
+                            # CW = Arrow Right
+                            self.state_manager.send_cuia("ARROW_RIGHT")
+                        return True
+                    elif ccnum == 92:
+                        # Knob 8 (CC 92): Arrow up/down control
+                        # Convert relative encoder value to direction
+                        if ccval == 1 or ccval < 64:
+                            # CCW = Arrow Down
+                            self.state_manager.send_cuia("ARROW_UP")
+                        elif ccval == 127 or ccval > 64:
+                            # CW = Arrow Up
+                            self.state_manager.send_cuia("ARROW_DOWN")
+                        return True
+                    return True
                 elif self.knob_bank == 2:
                     # Bank 2: Send CC 24-31 (standard MIDI CC)
                     # CC 85-92 map to CC 24-31
