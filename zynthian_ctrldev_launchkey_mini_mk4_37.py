@@ -34,6 +34,7 @@
 #******************************************************************************
 from time import sleep, time
 from threading import Timer
+import logging
 
 # Zynthian specific modules
 from zyngine.ctrldev.zynthian_ctrldev_base import zynthian_ctrldev_zynpad, zynthian_ctrldev_zynmixer
@@ -149,11 +150,11 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
                         if is_soloed:
                             # Soloed - solid yellow/orange (channel 0, high velocity)
                             chan = 0
-                            vel = 5
+                            vel = 14
                         else:
                             # Not soloed - solid dim (channel 0, low velocity)
                             chan = 0
-                            vel = 10
+                            vel = 118
                     else:
                         # No chain - off
                         chan = 0
@@ -362,7 +363,40 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
                             self.state_manager.send_cuia("ZYNPOT", [zynpot_index, delta])
                         
                         return True
-                    # Knob 5 (CC 89) is unused in bank 1
+                    elif ccnum == 89:
+                        # Knob 5 (CC 89): Browse presets (previous/next)
+                        # Convert relative encoder value to delta
+                        if ccval == 1 or ccval < 64:
+                            delta = -1
+                        elif ccval == 127 or ccval > 64:
+                            delta = 1
+                        else:
+                            delta = 0
+                        
+                        if delta != 0:
+                            # Get current processor
+                            try:
+                                chain = self.state_manager.chain_manager.get_active_chain()
+                                if chain and chain.current_processor:
+                                    processor = chain.current_processor
+                                    # Check if processor has presets
+                                    if hasattr(processor, 'preset_list') and processor.preset_list:
+                                        # Calculate new preset index
+                                        current_index = processor.preset_index if hasattr(processor, 'preset_index') else 0
+                                        new_index = current_index + delta
+                                        # Wrap around
+                                        if new_index < 0:
+                                            new_index = len(processor.preset_list) - 1
+                                        elif new_index >= len(processor.preset_list):
+                                            new_index = 0
+                                        # Set the new preset
+                                        processor.set_preset(new_index)
+                                        # Refresh the UI to show the updated preset
+                                        self.state_manager.send_cuia("refresh_screen", ["control"])
+                                        self.state_manager.send_cuia("refresh_screen", ["audio_mixer"])
+                            except Exception as e:
+                                logging.warning(f"Preset browsing error: {e}")
+                        return True
                     elif ccnum == 90:
                         # Knob 6 (CC 90): SELECT on clockwise / BACK on counter-clockwise
                         # Debounce to prevent accidental double selections
