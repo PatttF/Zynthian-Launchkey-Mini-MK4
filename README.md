@@ -64,9 +64,4 @@
 ## Notes
 
 - Master channel is **always** on the far right (Pad 7, Knob 8 in Bank 0)
-- Master channel is **filtered out** from regular chain positions if it appears in chain list
-- Only chains with mixer_chan < 16 appear in positions 0-6
-- All keyboard notes (37 keys) pass through to active synths
-- Pad notes (96-119) are blocked from synths and used only for control
-- Encoders in Transport mode send relative values (CCW < 64, CW > 64)
 - Default startup bank for knobs is Bank 1 (Control Mode)
