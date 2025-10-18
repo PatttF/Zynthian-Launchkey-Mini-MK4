@@ -63,5 +63,5 @@
 
 ## Notes
 
-- Master channel is **always** on the far right (Pad 7, Knob 8 in Bank 0)
+- Master channel is **always** on the far right
 - Default startup bank for knobs is Bank 1 (Control Mode)
