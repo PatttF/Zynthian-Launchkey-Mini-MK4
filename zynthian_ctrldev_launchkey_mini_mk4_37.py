@@ -26,11 +26,16 @@
 #
 #******************************************************************************
 # This driver implements support for the Novation Launchkey Mini MK4 37-key
-# controller in DAW mode with Transport mode encoders (relative):
-# - Keyboard input (all notes pass through to synths)
-# - Pad buttons (top row for solo, bottom row for mute)
-# - Three knob banks: Bank 0 (mixer 1-6), Bank 1 (ZYNPOT 0-3 + CC 20-23), Bank 2 (CC 24-31)
-# - Transport mode encoders for endless rotation
+# controller in DAW mode with Transport mode encoders (relative CC values).
+#
+# Features:
+# - Keyboard input (37 keys pass through to synths)
+# - Pad buttons: Top row=Solo, Bottom row=Mute (8 mixer channels)
+# - Three knob banks:
+#   Bank 0: Mixer levels (channels 1-8)
+#   Bank 1: ZYNPOT 0-3, Arrow L/R, Arrow U/D, Preset browse, SELECT/BACK
+#   Bank 2: CC passthrough (CC 24-31)
+# - Transport controls (Play, Record, Stop) with shift modifiers
 #******************************************************************************
 from time import sleep, time
 from threading import Timer
@@ -137,67 +142,52 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
             if not hasattr(self, 'chain_manager') or not hasattr(self, 'zynmixer'):
                 return
             
-            # Update solo pads (top row: 96-103 for tracks 0-7)
+            # Update solo pads (top row: notes 96-103)
+            # Pads 0-6: chains 0-6 (excluding master), Pad 7: master channel (no solo for master)
             for i in range(8):
                 note = 96 + i
                 try:
-                    chain = self.chain_manager.get_chain_by_position(i, midi=False)
-                    
-                    if chain and hasattr(chain, 'mixer_chan') and chain.mixer_chan is not None and chain.mixer_chan < 17:
-                        mixer_chan = chain.mixer_chan
-                        is_soloed = self.zynmixer.get_solo(mixer_chan)
+                    if i < 7:
+                        # Pads 0-6: Regular chains (skip master channel if it appears in chain list)
+                        chain = self.chain_manager.get_chain_by_position(i, midi=False)
                         
-                        if is_soloed:
-                            # Soloed - solid yellow/orange (channel 0, high velocity)
-                            chan = 0
-                            vel = 14
+                        if chain and hasattr(chain, 'mixer_chan') and chain.mixer_chan is not None and chain.mixer_chan < 16:
+                            mixer_chan = chain.mixer_chan
+                            is_soloed = self.zynmixer.get_solo(mixer_chan)
+                            vel = 14 if is_soloed else 118  # Yellow/orange if soloed, dim if not
                         else:
-                            # Not soloed - solid dim (channel 0, low velocity)
-                            chan = 0
-                            vel = 118
+                            vel = 0  # No chain or master channel - LED off
                     else:
-                        # No chain - off
-                        chan = 0
+                        # Pad 7: Master channel - always off (no solo for master)
                         vel = 0
                 except:
-                    # Error getting chain - turn off LED
-                    chan = 0
-                    vel = 0
+                    vel = 0  # Error - LED off
                 
-                lib_zyncore.dev_send_note_on(self.idev_out, chan, note, vel)
+                lib_zyncore.dev_send_note_on(self.idev_out, 0, note, vel)
             
-            # Update mute pads (bottom row: 112-119 for tracks 0-7)
+            # Update mute pads (bottom row: notes 112-119)
+            # Pads 0-6: chains 0-6 (excluding master), Pad 7: master channel
             for i in range(8):
                 note = 112 + i
-                
                 try:
-                    chain = self.chain_manager.get_chain_by_position(i, midi=False)
-                    if chain and hasattr(chain, 'mixer_chan') and chain.mixer_chan is not None and chain.mixer_chan < 17:
-                        mixer_chan = chain.mixer_chan
-                    else:
-                        mixer_chan = None
-                    
-                    if mixer_chan is not None:
-                        is_muted = self.zynmixer.get_mute(mixer_chan)
+                    if i < 7:
+                        # Pads 0-6: Regular chains (skip master channel if it appears in chain list)
+                        chain = self.chain_manager.get_chain_by_position(i, midi=False)
                         
-                        if is_muted:
-                            # Muted - solid red (channel 0, very low velocity)
-                            chan = 0
-                            vel = 5
+                        if chain and hasattr(chain, 'mixer_chan') and chain.mixer_chan is not None and chain.mixer_chan < 16:
+                            mixer_chan = chain.mixer_chan
+                            is_muted = self.zynmixer.get_mute(mixer_chan)
+                            vel = 5 if is_muted else 64  # Red if muted, green if unmuted
                         else:
-                            # Unmuted - solid green (channel 0, high velocity)
-                            chan = 0
-                            vel = 64
+                            vel = 0  # No chain or master channel - LED off
                     else:
-                        # No chain - off
-                        chan = 0
-                        vel = 0
+                        # Pad 7: Master channel (mixer channel 16)
+                        is_muted = self.zynmixer.get_mute(16)
+                        vel = 5 if is_muted else 64  # Red if muted, green if unmuted
                 except:
-                    # Error getting chain - turn off LED
-                    chan = 0
-                    vel = 0
+                    vel = 0  # Error - LED off
                 
-                lib_zyncore.dev_send_note_on(self.idev_out, chan, note, vel)
+                lib_zyncore.dev_send_note_on(self.idev_out, 0, note, vel)
         except Exception:
             # Silently fail if something goes wrong
             pass
@@ -214,13 +204,13 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
             
             # Block ALL pad notes (96-119) from reaching synths by consuming the event
             if 96 <= note <= 119:
-                # Process solo pads (96-103)
-                if 96 <= note <= 103 and evtype == 0x9 and vel > 0:
-                    # Top row (96-103): Solo control for tracks 0-7
+                # Process solo pads (96-102 only, pad 103 is master - no solo)
+                if 96 <= note <= 102 and evtype == 0x9 and vel > 0:
+                    # Top row (96-102): Solo control for chains 0-6 (excluding master)
                     track = note - 96
                     chain = self.chain_manager.get_chain_by_position(track, midi=False)
                     
-                    if chain and chain.mixer_chan is not None and chain.mixer_chan < 17:
+                    if chain and chain.mixer_chan is not None and chain.mixer_chan < 16:
                         mixer_chan = chain.mixer_chan
                         current_solo = self.zynmixer.get_solo(mixer_chan)
                         self.zynmixer.set_solo(mixer_chan, 0 if current_solo else 1)
@@ -228,18 +218,22 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
                 
                 # Process mute pads (112-119)
                 elif 112 <= note <= 119 and evtype == 0x9 and vel > 0:
-                    # Bottom row (112-119): Mute control for tracks 0-7
+                    # Bottom row: Pads 0-6 for chains 0-6 (excluding master), Pad 7 for master
                     track = note - 112
-                    chain = self.chain_manager.get_chain_by_position(track, midi=False)
                     
-                    if chain and chain.mixer_chan is not None and chain.mixer_chan < 17:
-                        mixer_chan = chain.mixer_chan
+                    if track < 7:
+                        # Pads 0-6: Regular chains (skip master if it appears in chain list)
+                        chain = self.chain_manager.get_chain_by_position(track, midi=False)
+                        
+                        if chain and chain.mixer_chan is not None and chain.mixer_chan < 16:
+                            mixer_chan = chain.mixer_chan
+                            current_mute = self.zynmixer.get_mute(mixer_chan)
+                            self.zynmixer.set_mute(mixer_chan, 0 if current_mute else 1)
+                            self.update_pad_leds()
                     else:
-                        mixer_chan = None
-                    
-                    if mixer_chan is not None:
-                        current_mute = self.zynmixer.get_mute(mixer_chan)
-                        self.zynmixer.set_mute(mixer_chan, 0 if current_mute else 1)
+                        # Pad 7: Master channel (mixer channel 16)
+                        current_mute = self.zynmixer.get_mute(16)
+                        self.zynmixer.set_mute(16, 0 if current_mute else 1)
                         self.update_pad_leds()
                 
                 # Block ALL pad notes (96-119, both on and off) from reaching synths
@@ -254,243 +248,157 @@ class zynthian_ctrldev_launchkey_mini_mk4_37(zynthian_ctrldev_zynpad, zynthian_c
             ccnum = ev[1] & 0x7F
             ccval = ev[2] & 0x7F
             
-            # Button mappings for CC-based buttons
+            # Navigation button mappings (fire on button press)
             button_commands = {
-                107: "PRESET",
                 105: "MENU",
+                106: "BACK",
+                107: "PRESET",
                 0x66: "ARROW_RIGHT",
-                0x67: "ARROW_LEFT",
-                106: "BACK"
+                0x67: "ARROW_LEFT"
             }
             
-            # Handle buttons 51 and 52 - bank switching normally, up/down with shift
+            # Buttons 51 and 52: Bank switching (normal), Arrow Up/Down (with shift)
             if ccnum == 51 and ccval > 0:
                 if self.shift:
-                    # Shift + Button 51: Arrow Up
                     self.state_manager.send_cuia("ARROW_UP")
                 else:
-                    # Button 51: Previous bank
-                    self.knob_bank = (self.knob_bank - 1) % 3  # Cycle through 3 banks
-                    # Update bank indicator LEDs
+                    self.knob_bank = (self.knob_bank - 1) % 3
                     self.update_button_leds()
                 return True
             elif ccnum == 52 and ccval > 0:
                 if self.shift:
-                    # Shift + Button 52: Arrow Down
                     self.state_manager.send_cuia("ARROW_DOWN")
                 else:
-                    # Button 52: Next bank
-                    self.knob_bank = (self.knob_bank + 1) % 3  # Cycle through 3 banks
-                    # Update bank indicator LEDs
+                    self.knob_bank = (self.knob_bank + 1) % 3
                     self.update_button_leds()
                 return True
             
-            # The Launchkey's physical shift button uses CC 0x3F.
+            # Physical shift button (CC 0x3F)
             elif ccnum == 0x3F:
-                self.shift = ccval != 0
+                self.shift = ccval > 0
                 return True
 
-            # Handle button 105 as ZYNSWITCH 3 with press/release detection
+            # Button 104: ZYNSWITCH 3 with press duration detection
             elif ccnum == 104:
                 if ccval > 0:
-                    # Button press: Record the current time
                     self.press_times[ccnum] = time()
-                    # Send LED feedback
-                    lib_zyncore.dev_send_ccontrol_change(self.idev_out, 0, ccnum, 127)
                 else:
-                    # Button release: Calculate the duration and send the command
                     if ccnum in self.press_times:
                         duration = time() - self.press_times[ccnum]
-                        if duration < 0.5:
-                            # Short press
-                            self.state_manager.send_cuia("ZYNSWITCH", [3, 'S'])
-                        elif duration < 1.5:
-                            # Bold press
-                            self.state_manager.send_cuia("ZYNSWITCH", [3, 'B'])
-                        else:
-                            # Long press
-                            self.state_manager.send_cuia("ZYNSWITCH", [3, 'L'])
+                        press_type = 'S' if duration < 0.5 else 'B' if duration < 1.5 else 'L'
+                        self.state_manager.send_cuia("ZYNSWITCH", [3, press_type])
                         del self.press_times[ccnum]
                 return True
-
-                
-            # Knobs 1-8 - behavior depends on current bank
-            # In Transport mode, knobs send CC 85-92 (relative values)
+            # Knobs 1-8 (CC 85-92): Behavior depends on current bank (Transport mode = relative)
             elif 84 < ccnum < 93:
                 if self.knob_bank == 0:
-                    # Bank 0: Knobs 1-8 for mixer channels 1-8
-                    # Knobs 1-8 for mixer channels 1-8 (CC 85-92)
-                    # In Transport mode, encoders send relative values
-                    mixer_channel = ccnum - 84
-                    chain = self.chain_manager.get_chain_by_position(mixer_channel - 1, midi=False)
-                    if chain and chain.mixer_chan is not None and chain.mixer_chan < 17:
-                        mixer_chan = chain.mixer_chan
-                        
-                        # Convert relative encoder value to delta
-                        # Novation Transport mode: 1-63 = CCW, 65-127 = CW (or possibly just 1 and 127)
-                        if ccval == 1 or ccval < 64:
-                            delta = -1 if ccval == 1 else -(64 - ccval)
-                        elif ccval == 127 or ccval > 64:
-                            delta = 1 if ccval == 127 else (ccval - 64)
+                    # Bank 0: Mixer channel levels
+                    # Knobs 1-7: chains 0-6 (excluding master), Knob 8: master channel
+                    knob_index = ccnum - 85  # 0-7
+                    
+                    # Convert relative encoder value to delta (Transport mode: 1/63 = CCW, 127/65 = CW)
+                    delta = -1 if ccval < 64 else 1 if ccval > 64 else 0
+                    
+                    if delta != 0:
+                        if knob_index < 7:
+                            # Knobs 1-7: Regular chains (skip master if it appears in chain list)
+                            chain = self.chain_manager.get_chain_by_position(knob_index, midi=False)
+                            if chain and chain.mixer_chan is not None and chain.mixer_chan < 16:
+                                mixer_chan = chain.mixer_chan
+                                current_level = self.zynmixer.get_level(mixer_chan)
+                                new_level = max(0.0, min(1.0, current_level + (delta * 0.01)))
+                                self.zynmixer.set_level(mixer_chan, new_level)
                         else:
-                            delta = 0
-                        
-                        if delta != 0:
-                            # Use direct mixer API to nudge level
-                            current_level = self.zynmixer.get_level(mixer_chan)
+                            # Knob 8: Master channel (mixer channel 16)
+                            current_level = self.zynmixer.get_level(16)
                             new_level = max(0.0, min(1.0, current_level + (delta * 0.01)))
-                            self.zynmixer.set_level(mixer_chan, new_level)
+                            self.zynmixer.set_level(16, new_level)
                     return True
                 elif self.knob_bank == 1:
-                    # Bank 1: Knobs 1-4 for ZYNPOT, 5 unused, 6 for SELECT/BACK, 7-8 for arrows
+                    # Bank 1: ZYNPOT 0-3, Arrow L/R, Arrow U/D, Presets, SELECT/BACK
                     if 84 < ccnum < 89:
-                        # Knobs 1-4 for ZYNPOT (CC 85-88)
-                        # Maps to ZYNPOT 0-3 (the 4 main rotary encoders on Zynthian)
-                        # In Transport mode, encoders send relative values
+                        # Knobs 1-4: ZYNPOT 0-3 (Zynthian's main rotary encoders)
                         zynpot_index = ccnum - 85
-                        
-                        # Convert relative encoder value to delta
-                        # Novation Transport mode: 1-63 = CCW, 65-127 = CW (or possibly just 1 and 127)
-                        if ccval == 1 or ccval < 64:
-                            delta = -1 if ccval == 1 else -(64 - ccval)
-                        elif ccval == 127 or ccval > 64:
-                            delta = 1 if ccval == 127 else (ccval - 64)
-                        else:
-                            delta = 0
+                        delta = -1 if ccval < 64 else 1 if ccval > 64 else 0
                         
                         if delta != 0:
-                            # Use regular ZYNPOT command with relative delta
                             self.state_manager.send_cuia("ZYNPOT", [zynpot_index, delta])
                         
                         return True
                     elif ccnum == 89:
-                        # Knob 5 (CC 89): Browse presets (previous/next)
-                        # Convert relative encoder value to delta
-                        if ccval == 1 or ccval < 64:
-                            delta = -1
-                        elif ccval == 127 or ccval > 64:
-                            delta = 1
-                        else:
-                            delta = 0
+                        # Knob 5: Arrow Left/Right
+                        self.state_manager.send_cuia("ARROW_LEFT" if ccval < 64 else "ARROW_RIGHT")
+                        return True
+                    elif ccnum == 90:
+                        # Knob 6: Arrow Up/Down
+                        self.state_manager.send_cuia("ARROW_UP" if ccval < 64 else "ARROW_DOWN")
+                        return True
+                    elif ccnum == 91:
+                        # Knob 7: Preset browsing (previous/next with wraparound)
+                        delta = -1 if ccval < 64 else 1 if ccval > 64 else 0
                         
                         if delta != 0:
-                            # Get current processor
                             try:
                                 chain = self.state_manager.chain_manager.get_active_chain()
                                 if chain and chain.current_processor:
                                     processor = chain.current_processor
-                                    # Check if processor has presets
                                     if hasattr(processor, 'preset_list') and processor.preset_list:
-                                        # Calculate new preset index
                                         current_index = processor.preset_index if hasattr(processor, 'preset_index') else 0
-                                        new_index = current_index + delta
-                                        # Wrap around
-                                        if new_index < 0:
-                                            new_index = len(processor.preset_list) - 1
-                                        elif new_index >= len(processor.preset_list):
-                                            new_index = 0
-                                        # Set the new preset
+                                        new_index = (current_index + delta) % len(processor.preset_list)
                                         processor.set_preset(new_index)
-                                        # Refresh the UI to show the updated preset
                                         self.state_manager.send_cuia("refresh_screen", ["control"])
                                         self.state_manager.send_cuia("refresh_screen", ["audio_mixer"])
                             except Exception as e:
                                 logging.warning(f"Preset browsing error: {e}")
                         return True
-                    elif ccnum == 90:
-                        # Knob 6 (CC 90): SELECT on clockwise / BACK on counter-clockwise
-                        # Debounce to prevent accidental double selections
+                    elif ccnum == 92:
+                        # Knob 8: SELECT (CW) / BACK (CCW) with 600ms debounce
                         current_time = time()
-                        if current_time - self.last_select_back_time < 0.6:  # 600ms debounce
+                        if current_time - self.last_select_back_time < 0.6:
                             return True
                         self.last_select_back_time = current_time
                         
-                        # Convert relative encoder value to direction
-                        if ccval == 1 or ccval < 64:
-                            # CCW = BACK
+                        if ccval < 64:
                             self.state_manager.send_cuia("BACK")
-                        elif ccval == 127 or ccval > 64:
-                            # CW = SELECT with short press simulation
+                        elif ccval > 64:
                             self.state_manager.send_cuia("ZYNSWITCH", [3, 'S'])
-                        return True
-                    elif ccnum == 91:
-                        # Knob 7 (CC 91): Arrow left/right control
-                        # Convert relative encoder value to direction
-                        if ccval == 1 or ccval < 64:
-                            # CCW = Arrow Left
-                            self.state_manager.send_cuia("ARROW_LEFT")
-                        elif ccval == 127 or ccval > 64:
-                            # CW = Arrow Right
-                            self.state_manager.send_cuia("ARROW_RIGHT")
-                        return True
-                    elif ccnum == 92:
-                        # Knob 8 (CC 92): Arrow up/down control
-                        # Convert relative encoder value to direction
-                        if ccval == 1 or ccval < 64:
-                            # CCW = Arrow Down
-                            self.state_manager.send_cuia("ARROW_UP")
-                        elif ccval == 127 or ccval > 64:
-                            # CW = Arrow Up
-                            self.state_manager.send_cuia("ARROW_DOWN")
                         return True
                     return True
                 elif self.knob_bank == 2:
-                    # Bank 2: Send CC 24-31 (standard MIDI CC)
-                    # CC 85-92 map to CC 24-31
-                    new_ccnum = ccnum - 85 + 24  # Map 85-92 to 24-31
-                    lib_zyncore.write_zynmidi([0xB0 | ev_chan, new_ccnum, ccval])
+                    # Bank 2: CC passthrough (85-92 → 24-31)
+                    lib_zyncore.write_zynmidi([0xB0 | ev_chan, ccnum - 61, ccval])
                     return True
             
-            # Combined ZynSwitch and Metronome logic
+            # Transport buttons (CC 74-77): ZynSwitch with press duration detection
+            # Special case: Shift + CC 76 = TEMPO
             elif ccnum in [74, 75, 76, 77]:
-                # If SHIFT is held and it's the Metronome button (CC 76)
-                if self.shift and ccnum == 76:
-                    if ccval > 0:
-                        self.state_manager.send_cuia("TEMPO")
+                if self.shift and ccnum == 76 and ccval > 0:
+                    self.state_manager.send_cuia("TEMPO")
                     return True
                 
-                # ZynSwitch logic for button presses and releases
-                zynswitch_index = {74: 0, 75: 1, 76: 3, 77: 2}.get(ccnum)
+                zynswitch_index = {74: 0, 75: 1, 76: 3, 77: 2}[ccnum]
                 if ccval > 0:
-                    # Button press: Record the current time
                     self.press_times[ccnum] = time()
-                else:
-                    # Button release: Calculate the duration and send the command
-                    if ccnum in self.press_times:
-                        duration = time() - self.press_times[ccnum]
-                        if duration < 0.5:
-                            # Short press
-                            self.state_manager.send_cuia("ZYNSWITCH", [zynswitch_index, 'S'])
-                        elif duration < 1.5:
-                            # Bold press
-                            self.state_manager.send_cuia("ZYNSWITCH", [zynswitch_index, 'B'])
-                        else:
-                            # Long press
-                            self.state_manager.send_cuia("ZYNSWITCH", [zynswitch_index, 'L'])
-                        del self.press_times[ccnum]
+                elif ccnum in self.press_times:
+                    duration = time() - self.press_times[ccnum]
+                    press_type = 'S' if duration < 0.5 else 'B' if duration < 1.5 else 'L'
+                    self.state_manager.send_cuia("ZYNSWITCH", [zynswitch_index, press_type])
+                    del self.press_times[ccnum]
                 return True
 
-            # Handle the PLAY and RECORD buttons
+            # Play button (CC 0x73): PLAY (normal) / MIDI_PLAY (shift)
             elif ccnum == 0x73 and ccval > 0:
-                if self.shift:
-                    self.state_manager.send_cuia("TOGGLE_MIDI_PLAY")
-                else:
-                    self.state_manager.send_cuia("TOGGLE_PLAY")
-                return True
-            elif ccnum == 0x75 and ccval > 0:
-                if self.shift:
-                    self.state_manager.send_cuia("TOGGLE_MIDI_RECORD")
-                else:
-                    self.state_manager.send_cuia("TOGGLE_RECORD")
+                self.state_manager.send_cuia("TOGGLE_MIDI_PLAY" if self.shift else "TOGGLE_PLAY")
                 return True
             
-            # Use the dictionary for the remaining buttons and check for press
-            elif ccnum in button_commands and ccval > 0:
-                # Send LED feedback
-                lib_zyncore.dev_send_ccontrol_change(self.idev_out, 0, ccnum, 127)
-                self.state_manager.send_cuia(button_commands[ccnum])
+            # Record button (CC 0x75): RECORD (normal) / MIDI_RECORD (shift)
+            elif ccnum == 0x75 and ccval > 0:
+                self.state_manager.send_cuia("TOGGLE_MIDI_RECORD" if self.shift else "TOGGLE_RECORD")
                 return True
-            elif ccnum == 0 or ccval == 0:
+            
+            # Navigation buttons: Send CUIA commands on button press
+            elif ccnum in button_commands and ccval > 0:
+                self.state_manager.send_cuia(button_commands[ccnum])
                 return True
 
         elif evtype == 0xC:
